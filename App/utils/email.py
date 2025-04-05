@@ -6,10 +6,10 @@ from model.transaction import Transaction
 from model.user import User
 
 # ✅ Correct Outlook SMTP settings
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USERNAME = "matovie22@gmail.com"
-SMTP_PASSWORD = "egbveryflhexedon"  # Use App Password if needed
+SMTP_SERVER = ""
+SMTP_PORT = ###587
+SMTP_USERNAME = ""
+SMTP_PASSWORD = ""  # Use App Password if needed
 
 async def send_email_alert(subject: str, body: str, to_email: str):
     msg = EmailMessage()
