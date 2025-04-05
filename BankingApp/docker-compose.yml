@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  db:
+    container_name: postgres_db
+    image: postgres:16
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: sunny
+      POSTGRES_PASSWORD: sunny
+    networks:
+      - bankingapp_network
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunny -d mydatabase"]
+      interval: 10s
+      retries: 5
+      start_period: 10s
+
+  pgadmin:
+    container_name: pgadmin
+    image: dpage/pgadmin4:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    networks:
+      - bankingapp_network
+    ports:
+      - "9090:80"
+
+  redis:
+    container_name: redis
+    image: redis:latest
+    networks:
+      - bankingapp_network
+    ports:
+      - "6379:6379"
+
+networks:
+  bankingapp_network:
+    name: bankingapp_network
+
+volumes:
+  postgres_data:
+    name: bankingapp_postgres_data
