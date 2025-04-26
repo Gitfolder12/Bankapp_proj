@@ -1,23 +1,15 @@
-
-import os
 from peewee import PostgresqlDatabase
-from dotenv import load_dotenv
+# import redis
 
-# Load env file
-load_dotenv()
-
-# Get environment variables (no defaults)
-DB_NAME = os.environ["DB_NAME"]
-DB_USER = os.environ["DB_USER"]
-DB_PASSWORD = os.environ["DB_PASSWORD"]
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = os.environ["DB_PORT"]
-
-# Initialize the PostgreSQL database connection using env vars
+# Initialize the PostgreSQL database connection
 db = PostgresqlDatabase(
-    DB_NAME,
-    user=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=DB_PORT
+    "mydatabase",
+    user="sunny",
+    password="sunny",
+    host="localhost",
+    port="5432"
 )
+
+
+# Connect to Redis for OTP storage
+# redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)

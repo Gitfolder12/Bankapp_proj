@@ -56,7 +56,6 @@ class Loan(Model):
              
              # Check if deposits meet or exceed the loan amount
              total_deposits = cls.get_total_deposit(loan_data.user)
-             
             
              if total_deposits >= loan_data.amount:
                 

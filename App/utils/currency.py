@@ -1,4 +1,3 @@
-from fastapi import HTTPException
 import requests
 from dto.currency import CurrencyConvert
 
@@ -9,13 +8,6 @@ class ExchangeRateConverter:
 
     def __init__(self, currency: CurrencyConvert):
         self.currency = currency
-        
-         # Validate currency to  uppercase only 
-        if not self.currency.from_currency.isupper() or not self.currency.to_currency.isupper():
-            raise HTTPException(
-                status_code=400,
-                detail="Currency codes must be uppercase letters (e.g., 'USD', 'PLN')."
-            )
 
     def get_exchange_rate(self):
         """Fetches the exchange rate from an external API with error handling."""
@@ -26,8 +18,6 @@ class ExchangeRateConverter:
             
             # Parse the response data
             data = response.json()
-            
-            # print(f"data : {data}")
             
             # Check if the 'rates' field and requested currency exist
             if 'rates' in data and self.currency.to_currency in data['rates']:

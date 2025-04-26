@@ -2,8 +2,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Security
-from fastapi.security import HTTPBearer
-from jose import jwt
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
 
 security = HTTPBearer()  # Extracts "Authorization: Bearer <token>" header
 
