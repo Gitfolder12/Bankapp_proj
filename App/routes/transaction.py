@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from middlewares.index import role_middleware
 from model.transaction import Transaction
 from dto.transaction import TransactionCreate
 from model.user import User
@@ -8,7 +9,10 @@ router = APIRouter()
 
 # Route to get all Transaction
 @router.get("/transactions/", tags=["transactions"])
+@role_middleware()
 async def get_transactions(request: Request):
+    print("Inside route")
+    print("Request state userid:", getattr(request.state, "userid", None))
     user_id = getattr(request.state, "userid", None)  # Use getattr to safely access state
     if not user_id:
         return {"error": "User ID not found in request state"}
@@ -23,12 +27,14 @@ async def get_transactions(request: Request):
 
 # Route to get all Transaction
 @router.get("/transactions/{id}", tags=["transactions"])
+# @role_middleware
 async def get_transaction(id: int):
           transaction = Transaction.findOne(id)  # Call the findAll method from User model
           return transaction
 
 # Route to create a new transaction
 @router.post("/transactions/", tags=["transactions"])
+@role_middleware()
 async def create_transaction(transaction: TransactionCreate):
     try:
         new_transaction = Transaction.create_transaction(transaction)

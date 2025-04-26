@@ -1,15 +1,19 @@
+import os
 import aiosmtplib
 from email.message import EmailMessage
 from datetime import datetime
-
+from dotenv import load_dotenv
 from model.transaction import Transaction
 from model.user import User
 
-# ✅ Correct Outlook SMTP settings
-SMTP_SERVER = ""
-SMTP_PORT = ###587
-SMTP_USERNAME = ""
-SMTP_PASSWORD = ""  # Use App Password if needed
+# Load environment variables
+load_dotenv()
+
+# SMTP settings from environment
+SMTP_SERVER = os.environ.get("SMTP_SERVER")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))  # default 587 if not set
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 
 async def send_email_alert(subject: str, body: str, to_email: str):
     msg = EmailMessage()

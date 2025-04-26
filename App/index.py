@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI 
 from connection.index import db
-from middlewares.index import auth_middleware, log_requests
+from middlewares.index import log_requests
 from model.index import create_tables
 from routes.index import register_routers
 
@@ -31,4 +31,3 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 app.middleware('http')(log_requests)
-app.middleware('http')(auth_middleware)
