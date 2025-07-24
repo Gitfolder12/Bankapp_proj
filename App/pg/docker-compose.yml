@@ -1,0 +1,35 @@
+# version: '3.8'
+
+# services:
+#   oracle-xe:
+#     image: gvenzl/oracle-xe:21-slim
+#     container_name: oracle-xe
+#     ports:
+#       - "1521:1521"   # SQL*Net port
+#       - "5550:5500"   # Enterprise Manager Express
+#     environment:
+#       ORACLE_PASSWORD: Oracle123
+#     restart: unless-stopped
+
+
+version: '3.8'
+
+services:
+  oracle-xe:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: oracle-xe
+    ports:
+      - "1521:1521"   # Oracle DB port
+      - "8080:8080"   # APEX/SQL Developer Web
+    environment:
+      ORACLE_PASSWORD: Oracle123          # Change this to a strong password
+      ENABLE_ARCHIVELOG: false
+      ENABLE_XDB: true                    # Enables HTTP access for SQL Developer Web
+      APP_USER: appuser                   # Optional application user
+      APP_USER_PASSWORD: appuser123       # Optional password for APP_USER
+    volumes:
+      - oracle-xe-data:/opt/oracle/oradata
+    restart: unless-stopped
+
+volumes:
+  oracle-xe-data:
