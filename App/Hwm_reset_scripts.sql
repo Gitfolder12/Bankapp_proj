@@ -14,6 +14,7 @@ create or replace PROCEDURE reset_hwm_for_schema (
     v_object_name       VARCHAR2(128);
     v_object_type       VARCHAR2(128);
     v_exists            NUMBER;
+    v_pending_subparts  NUMBER;
 
     PROCEDURE check_runtime IS
     BEGIN
@@ -21,33 +22,44 @@ create or replace PROCEDURE reset_hwm_for_schema (
             RETURN;
         END IF;
     END;
+    
+    -- <<< helper to log once everywhere >>>
+    PROCEDURE log_result IS
+    BEGIN
+        log_action(
+            p_owner       => p_schema,
+            p_base_table  => v_table_name,
+            p_object_name => v_object_name,
+            p_object_type => v_object_type,
+            p_status      => v_status,
+            p_error_msg   => v_error_msg
+        );
+    END;
 
 BEGIN
-  -- Partitioned tables in schema
+    -- Loop over partitioned tables
     FOR tbl IN (
-        SELECT 
-               t.table_name
-          FROM dba_tables t
-         WHERE t.owner = p_schema
-           AND t.partitioned = 'YES' 
-           AND t.table_name NOT IN ('HWM_LOG') -- exclude specific tables
-    )LOOP
+        SELECT t.table_name
+        FROM dba_tables t
+        WHERE t.owner = p_schema
+          AND t.partitioned = 'YES' 
+          AND t.table_name NOT IN ('HWM_LOG')
+          AND t.table_name IN ('TEST_PARTITION', 'SALES_DATA')
+    ) LOOP
         v_table_name := tbl.table_name;
 
         FOR part IN (
             SELECT partition_name
             FROM dba_tab_partitions
-            WHERE table_owner = p_schema 
+            WHERE table_owner = p_schema
               AND table_name = v_table_name
-            ORDER BY partition_name 
+            ORDER BY partition_name
         ) LOOP
-            check_runtime;
-
             v_partition_name := part.partition_name;
 
-             --- If partition already complete, skip it (idempotent)
+            -- Skip partition if already processed
             SELECT COUNT(*) INTO v_exists
-            FROM fdr_new.hwm_log
+            FROM hr.hwm_log
             WHERE owner = p_schema
               AND base_table = v_table_name
               AND object_type = 'PARTITION'
@@ -58,173 +70,152 @@ BEGIN
                 CONTINUE;
             END IF;
 
-            -- Get Count pending subpartitions for this partition 
-            SELECT COUNT(*) 
-            INTO v_subpart_count
+            -- Count pending subpartitions
+            SELECT COUNT(*) INTO v_subpart_count
             FROM dba_tab_subpartitions s
-            WHERE s.table_owner    = p_schema 
-              AND s.table_name     = v_table_name 
+            WHERE s.table_owner = p_schema
+              AND s.table_name = v_table_name
               AND s.partition_name = v_partition_name
-              AND  NOT EXISTS (
-                              SELECT 1
-                              FROM fdr_new.hwm_log l
-                              WHERE l.owner = p_schema
-                                AND l.base_table   = v_table_name
-                                AND l.object_type  = 'SUBPARTITION'
-                                AND l.object_name  = s.subpartition_name
-                                AND l.status = 'SUCCESS'
-                          );
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM hr.hwm_log l
+                  WHERE l.owner = p_schema
+                    AND l.base_table = v_table_name
+                    AND l.object_type = 'SUBPARTITION'
+                    AND l.object_name = s.subpartition_name
+                    AND l.status = 'SUCCESS'
+              );
 
-          BEGIN
-            IF v_subpart_count > 0 THEN
-                -- Subpartitioned table
-                FOR subpart IN (
-                    SELECT subpartition_name
-                    FROM dba_tab_subpartitions s
-                    WHERE s.table_owner = p_schema 
-                      AND s.table_name = v_table_name 
-                      AND s.partition_name = v_partition_name
-                      AND NOT EXISTS (
+            BEGIN
+                -- Process subpartitions if exist
+                IF v_subpart_count > 0 THEN
+                    FOR subpart IN (
+                        SELECT subpartition_name
+                        FROM dba_tab_subpartitions s
+                        WHERE s.table_owner = p_schema
+                          AND s.table_name = v_table_name
+                          AND s.partition_name = v_partition_name
+                          AND NOT EXISTS (
                               SELECT 1
-                              FROM fdr_new.hwm_log l
+                              FROM hr.hwm_log l
                               WHERE l.owner = p_schema
-                                AND l.base_table   = v_table_name
-                                AND l.object_type  = 'SUBPARTITION'
-                                AND l.object_name  = s.subpartition_name
+                                AND l.base_table = v_table_name
+                                AND l.object_type = 'SUBPARTITION'
+                                AND l.object_name = s.subpartition_name
                                 AND l.status = 'SUCCESS'
                           )
-                          ORDER BY s.partition_name
-                ) LOOP
-                        
+                        ORDER BY s.subpartition_name
+                    ) LOOP
+                        check_runtime;
                         v_subpartition_name := subpart.subpartition_name;
-                        -- Move Subpartition
-                        EXECUTE IMMEDIATE ' ALTER TABLE ' 
-                                          || p_schema 
-                                          || '.' 
-                                          || v_table_name 
-                                          || ' MOVE SUBPARTITION ' 
-                                          || v_subpartition_name 
-                                          || ' TABLESPACE ' 
-                                          || p_table_tbs 
-                                          ;
-                        -- Move Lobs
+                        
+                        dbms_output.put_line('partition --> ' || v_partition_name || ' : subpartition --> ' || v_subpartition_name);
+
+                        -- Move subpartition
+                        EXECUTE IMMEDIATE 'ALTER TABLE ' || p_schema || '.' || v_table_name ||
+                                          ' MOVE SUBPARTITION ' || v_subpartition_name ||
+                                          ' TABLESPACE ' || p_table_tbs;
+
+                        -- Move LOBs
                         FOR rec IN (
                             SELECT sp.lob_subpartition_name, l.column_name
                             FROM dba_lobs l
-                            JOIN dba_lob_subpartitions sp ON l.owner = sp.table_owner
-                                AND l.table_name = sp.table_name 
-                                AND l.column_name = sp.lob_name
-                            WHERE l.owner = p_schema AND l.table_name = v_table_name 
+                            JOIN dba_lob_subpartitions sp
+                              ON l.owner = sp.table_owner
+                             AND l.table_name = sp.table_name
+                             AND l.column_name = sp.lob_name
+                            WHERE l.owner = p_schema
+                              AND l.table_name = v_table_name
                         ) LOOP
-
-                            EXECUTE IMMEDIATE ' ALTER TABLE ' 
-                                              || p_schema 
-                                              || '.' 
-                                              || v_table_name 
-                                              || ' MOVE SUBPARTITION ' 
-                                              || rec.lob_subpartition_name 
-                                              || ' LOB(' 
-                                              || rec.column_name 
-                                              || ') STORE AS (TABLESPACE ' 
-                                              || p_table_tbs || ')';
+                            EXECUTE IMMEDIATE 'ALTER TABLE ' || p_schema || '.' || v_table_name ||
+                                              ' MOVE SUBPARTITION ' || rec.lob_subpartition_name ||
+                                              ' LOB(' || rec.column_name || ') STORE AS (TABLESPACE ' || p_table_tbs || ')';
                         END LOOP;
 
-                        --Rebuild local index
+                        -- Rebuild local index
                         FOR idxsub IN (
                             SELECT isp.index_name, isp.subpartition_name, isp.tablespace_name
                             FROM dba_ind_subpartitions isp
-                            JOIN dba_indexes ix ON isp.index_name = ix.index_name 
-                                AND isp.index_owner = ix.owner
-                            WHERE ix.table_owner = p_schema 
+                            JOIN dba_indexes ix
+                              ON isp.index_name = ix.index_name
+                             AND isp.index_owner = ix.owner
+                            WHERE ix.table_owner = p_schema
                               AND ix.table_name = v_table_name
-                              AND isp.status = 'UNUSABLE' 
+                              AND isp.status = 'UNUSABLE'
                               AND isp.subpartition_name = v_subpartition_name
                         ) LOOP
-
-                            IF idxsub.tablespace_name = p_schema||'_DATA_IDX' THEN
-                                    EXECUTE IMMEDIATE ' ALTER INDEX ' 
-                                                      || p_schema 
-                                                      || '.' 
-                                                      || idxsub.index_name 
-                                                      || ' REBUILD SUBPARTITION ' 
-                                                      || idxsub.subpartition_name 
-                                                      || ' TABLESPACE ' 
-                                                      || p_index_tbs
-                                                      ;
+                            IF idxsub.tablespace_name = p_schema || '_DATA_IDX' THEN
+                                EXECUTE IMMEDIATE 'ALTER INDEX ' || p_schema || '.' || idxsub.index_name ||
+                                                  ' REBUILD SUBPARTITION ' || idxsub.subpartition_name ||
+                                                  ' TABLESPACE ' || p_index_tbs;
+                            ELSE
+                                EXECUTE IMMEDIATE 'ALTER INDEX ' || p_schema || '.' || idxsub.index_name ||
+                                                  ' REBUILD SUBPARTITION ' || idxsub.subpartition_name ||
+                                                  ' TABLESPACE ' || p_table_tbs;
                             END IF;
-
-                            IF idxsub.tablespace_name = p_schema||'_DATA' THEN
-                                 EXECUTE IMMEDIATE ' ALTER INDEX ' 
-                                                      || p_schema 
-                                                      || '.' 
-                                                      || idxsub.index_name 
-                                                      || ' REBUILD SUBPARTITION ' 
-                                                      || idxsub.subpartition_name 
-                                                      || ' TABLESPACE ' 
-                                                      || p_table_tbs
-                                                      ;
-                           END IF;
                         END LOOP;
 
-                        -- Gather stats on subpartition
+                        -- Gather stats
                         DBMS_STATS.GATHER_TABLE_STATS(
-                                    ownname           => p_schema, 
-                                    tabname           => v_table_name, 
-                                    partname          => v_subpartition_name,
-                                    granularity       => 'SUBPARTITION',
-                                    cascade           => TRUE,
-                                    estimate_percent  => DBMS_STATS.AUTO_SAMPLE_SIZE
-                                );
+                            ownname => p_schema,
+                            tabname => v_table_name,
+                            partname => v_subpartition_name,
+                            granularity => 'SUBPARTITION',
+                            cascade => TRUE,
+                            estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE
+                        );
+                        
+                         -- Log each subpartition
+                        v_object_name := v_subpartition_name;
+                        v_object_type := 'SUBPARTITION';
+                        v_status := 'SUCCESS';
+                        v_error_msg := NULL;
+                        log_result;
 
+                    END LOOP;
 
-                       v_object_name := v_subpartition_name;
-                       v_object_type := 'SUBPARTITION';
-                END LOOP;
+                    -- Log parent partition after all subpartitions done
+                    SELECT COUNT(*) INTO v_pending_subparts
+                    FROM dba_tab_subpartitions s
+                    WHERE s.table_owner = p_schema
+                      AND s.table_name = v_table_name
+                      AND s.partition_name = v_partition_name
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM hr.hwm_log l
+                          WHERE l.owner = p_schema
+                            AND l.base_table = v_table_name
+                            AND l.object_type = 'SUBPARTITION'
+                            AND l.object_name = s.subpartition_name
+                            AND l.status = 'SUCCESS'
+                      );
 
-            ELSE
-                    check_runtime;
-
-                    SELECT COUNT(*) INTO v_exists
-                    FROM fdr_new.hwm_log
-                    WHERE owner = p_schema
-                      AND base_table = v_table_name
-                      AND object_name = v_partition_name
-                      AND object_type = 'PARTITION'
-                      AND status = 'SUCCESS';
-
-                    IF v_exists > 0 THEN
-                        CONTINUE;
+                    IF v_pending_subparts = 0 THEN
+                        v_object_name := v_partition_name;
+                        v_object_type := 'PARTITION';
+                        v_status := 'SUCCESS';
+                        v_error_msg := NULL;
+                        log_result;
                     END IF;
+                 
+                ELSE
+                    check_runtime;
+                    -- Regular partition with no subpartitions
+                    EXECUTE IMMEDIATE 'ALTER TABLE ' || p_schema || '.' || v_table_name ||
+                                      ' MOVE PARTITION ' || v_partition_name ||
+                                      ' TABLESPACE ' || p_table_tbs;
 
-                    -- Regular partition
-                    EXECUTE IMMEDIATE '  ALTER TABLE ' 
-                                      || p_schema 
-                                      || '.' 
-                                      || v_table_name 
-                                      || ' MOVE PARTITION ' 
-                                      || v_partition_name 
-                                      || ' TABLESPACE ' 
-                                      || p_table_tbs
-                                      ;
-                    -- Move lobs
+                    -- Move LOBs
                     FOR rec IN (
                         SELECT column_name
                         FROM dba_lobs
                         WHERE owner = p_schema AND table_name = v_table_name
                     ) LOOP
-
-                        EXECUTE IMMEDIATE ' ALTER TABLE ' 
-                                          || p_schema 
-                                          || '.' 
-                                          || v_table_name 
-                                          || ' MOVE LOB(' 
-                                          || rec.column_name 
-                                          || ') STORE AS (TABLESPACE ' 
-                                          || p_table_tbs 
-                                          || ')';
+                        EXECUTE IMMEDIATE 'ALTER TABLE ' || p_schema || '.' || v_table_name ||
+                                          ' MOVE LOB(' || rec.column_name || ') STORE AS (TABLESPACE ' || p_table_tbs || ')';
                     END LOOP;
 
-                    --Rebuild local index
+                    -- Rebuild local index
                     FOR idx IN (
                         SELECT ip.index_name, ip.partition_name, ip.tablespace_name
                         FROM dba_ind_partitions ip
@@ -234,174 +225,43 @@ BEGIN
                           AND ip.status = 'UNUSABLE' 
                           AND ip.partition_name = v_partition_name
                     ) LOOP
-
-                        IF idx.tablespace_name = p_schema||'_DATA_IDX' THEN
-                                EXECUTE IMMEDIATE ' ALTER INDEX ' 
-                                                  || p_schema 
-                                                  || '.' 
-                                                  || idx.index_name 
-                                                  || ' REBUILD PARTITION ' 
-                                                  || idx.partition_name 
-                                                  || ' TABLESPACE '
-                                                  || p_index_tbs
-                                                  || ' PARALLEL 4 ' 
-                                                  ;
-                       END IF;
-
-                       IF idx.tablespace_name = p_schema||'_DATA' THEN
-                                EXECUTE IMMEDIATE ' ALTER INDEX ' 
-                                                  || p_schema 
-                                                  || '.' 
-                                                  || idx.index_name 
-                                                  || ' REBUILD PARTITION ' 
-                                                  || idx.partition_name 
-                                                  || ' TABLESPACE '
-                                                  || p_table_tbs
-                                                  ;
-                       END IF;
+                        IF idx.tablespace_name = p_schema || '_DATA_IDX' THEN
+                            EXECUTE IMMEDIATE 'ALTER INDEX ' || p_schema || '.' || idx.index_name ||
+                                              ' REBUILD PARTITION ' || idx.partition_name ||
+                                              ' TABLESPACE ' || p_index_tbs || ' PARALLEL 4';
+                        ELSE
+                            EXECUTE IMMEDIATE 'ALTER INDEX ' || p_schema || '.' || idx.index_name ||
+                                              ' REBUILD PARTITION ' || idx.partition_name ||
+                                              ' TABLESPACE ' || p_table_tbs;
+                        END IF;
                     END LOOP;
 
-                    -- Gather stats on partition
+                    -- Gather stats
                     DBMS_STATS.GATHER_TABLE_STATS(
-                        ownname     => p_schema, 
-                        tabname     => v_table_name, 
-                        partname    => v_partition_name,
+                        ownname => p_schema,
+                        tabname => v_table_name,
+                        partname => v_partition_name,
                         granularity => 'PARTITION',
-                        cascade     => TRUE,
+                        cascade => TRUE,
                         estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE
                     );
+                     -- Log partition
+                    v_object_name := v_partition_name;
+                    v_object_type := 'PARTITION';
+                    v_status := 'SUCCESS';
+                    v_error_msg := NULL;
+                    log_result;
+                END IF;
 
-
-                        v_object_name := v_partition_name;
-                        v_object_type := 'PARTITION';          
-            END IF;
-
-                        v_status := 'SUCCESS';
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        v_status    := 'FAILED';
-                        v_error_msg := 'FAILED: ' || SQLERRM;
-
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_status := 'FAILED';
+                    v_error_msg := 'FAILED: ' || SQLERRM;
+                    log_result;
             END;
             
-            dbms_output.put_line('partition --> ' || v_partition_name ||' : ' || 'subpartition --> ' || v_subpartition_name);
-                --log action 
-                log_action( p_owner        => p_schema,
-                            p_base_table   => v_table_name,
-                            p_object_name  => v_object_name ,
-                            p_object_type  => v_object_type,
-                            p_status       => v_status ,
-                            p_error_msg    => v_error_msg 
-                            );
+
         END LOOP;
-    END LOOP;
-
-
-    -- Process non-partitioned tables
-    FOR tb1 IN (
-        SELECT t.table_name
-        FROM dba_tables t
-        WHERE owner = p_schema
-          AND t.partitioned = 'NO'
-          AND t.table_name NOT IN ('HWM_LOG')
-          AND NOT EXISTS (
-                  SELECT 1
-                  FROM fdr_new.HWM_LOG l
-                  WHERE l.base_table = t.table_name
-                    AND l.object_type = 'TABLE'
-                    AND l.status = 'SUCCESS')
-
-    ) LOOP
-            check_runtime;
-
-        BEGIN
-            v_table_name := tb1.table_name;
-            v_partition_name := NULL;
-
-            -- Move table
-            EXECUTE IMMEDIATE ' ALTER TABLE ' 
-                              || p_schema 
-                              || '.' 
-                              || v_table_name 
-                              || ' MOVE TABLESPACE ' 
-                              || p_table_tbs
-                              || ' UPDATE INDEXES '
-                              ;
-
-            -- Move LOBs
-            FOR lob_rec IN (
-                SELECT column_name
-                FROM dba_lobs
-                WHERE owner = p_schema
-                  AND table_name = v_table_name
-            ) LOOP
-                EXECUTE IMMEDIATE ' ALTER TABLE ' 
-                                  || p_schema 
-                                  || '.' 
-                                  || v_table_name 
-                                  || ' MOVE LOB(' 
-                                  || lob_rec.column_name 
-                                  || ') STORE AS (TABLESPACE ' 
-                                  || p_table_tbs 
-                                  || ')';
-            END LOOP;
-
-            -- Rebuild unusable indexes
-            FOR ix IN (
-                SELECT index_name, tablespace_name
-                FROM dba_indexes
-                WHERE owner = p_schema
-                  AND table_name = v_table_name
-                  AND status = 'UNUSABLE'
-            ) LOOP
-
-                IF ix.tablespace_name = p_schema||'_DATA_IDX' THEN
-                    EXECUTE IMMEDIATE  ' ALTER INDEX ' 
-                                      || p_schema 
-                                      || '.' 
-                                      || ix.index_name 
-                                      || ' REBUILD TABLESPACE ' 
-                                      || p_index_tbs 
-                                      ;
-                END IF ;
-
-                IF ix.tablespace_name = p_schema||'_DATA' THEN
-                    EXECUTE IMMEDIATE  ' ALTER INDEX ' 
-                                      || p_schema 
-                                      || '.' 
-                                      || ix.index_name 
-                                      || ' REBUILD TABLESPACE ' 
-                                      || p_table_tbs 
-                                      ;
-                END IF ;
-
-             END LOOP;
-
-            -- Gather statistics
-            DBMS_STATS.GATHER_TABLE_STATS(
-                ownname           => p_schema,
-                tabname           => v_table_name,
-                cascade           => TRUE,
-                estimate_percent  => DBMS_STATS.AUTO_SAMPLE_SIZE
-            );
-
-                v_status := 'SUCCESS';
-
-        EXCEPTION
-            WHEN OTHERS THEN
-                v_status    := 'FAILED';
-                v_error_msg := 'FAILED: ' || SQLERRM;
-        END;
-
-        -- Log action              
-         log_action( p_owner        => p_schema,
-                     p_base_table   => v_table_name,
-                     p_object_name  => null ,
-                     p_object_type  => 'TABLE',
-                     p_status       => v_status ,
-                     p_error_msg    => v_error_msg 
-                            );
-
     END LOOP;
 
 END reset_hwm_for_schema;
