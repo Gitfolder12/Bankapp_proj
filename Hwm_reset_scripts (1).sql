@@ -17,6 +17,23 @@ create or replace PROCEDURE reset_hwm_for_schema (
     v_exists            NUMBER;
     v_pending_subparts  NUMBER;
 
+--ISSUE TO ATTEND 
+--P20191231	P20191231_S1
+--P20191231	P20191231_S1000
+--P20191231	P20191231_S1001
+--P20191231	P20191231_S1002
+
+--PNULL	PNULL_SA
+--PNULL	PNULL_SV
+--PNULL	PNULL_SW
+--PNULL	PNULL_SE
+--PNULL	PNULL_SU
+
+--P20191231	P20191231_SES
+--P20191231	P20191231_SPL
+--P20191231	P20191231_SRO
+--P20191231	P20191231_SUK
+
     ex_runtime_exceeded EXCEPTION;
     PRAGMA EXCEPTION_INIT(ex_runtime_exceeded, -20001);
 
@@ -40,14 +57,14 @@ create or replace PROCEDURE reset_hwm_for_schema (
     END;
 
 BEGIN
-  -- Partitioned tables in schema
+ -- Partitioned tables in schema
   FOR tbl IN (
         SELECT t.table_name
         FROM dba_tables t
         WHERE t.owner = p_schema
           AND t.partitioned = 'YES' 
           AND t.table_name NOT IN ('HWM_LOG')
-          AND t.table_name IN ( 'SALES_DATA', 'SALES_DATA')
+          AND t.table_name IN ( 'RR_BALANCES_OUT')
     ) LOOP
         v_table_name := tbl.table_name;
 
@@ -56,7 +73,6 @@ BEGIN
             FROM dba_tab_partitions
             WHERE table_owner = p_schema
               AND table_name = v_table_name
-              AND (p_country is null or partition_name like '%' || p_country || '%')
             ORDER BY partition_name
         ) LOOP
             v_partition_name := part.partition_name;
@@ -66,8 +82,18 @@ BEGIN
             FROM dba_tab_subpartitions s
             WHERE s.table_owner = p_schema
               AND s.table_name = v_table_name
-              AND s.partition_name = v_partition_name
-              AND (p_country is null or s.subpartition_name like '%' || p_country || '%')
+              AND s.partition_name = v_partition_name 
+--              AND (p_country IS NULL OR s.subpartition_name LIKE '%' || p_country || '%')
+              AND (
+                    ( p_country IS NULL
+                      AND REGEXP_LIKE(s.subpartition_name, '(^|_)S[0-9]+(_|$)', 'i')
+                      AND NOT REGEXP_LIKE(s.subpartition_name, '(^|_)S(UK|PL|RO|ES)(_|$)', 'i') )
+                 OR ( REGEXP_LIKE(p_country, '^[0-9]+$')
+                      AND REGEXP_LIKE(s.subpartition_name, '(^|_)S' || p_country || '(_|$)', 'i') )
+                 OR ( REGEXP_LIKE(p_country, '^[A-Za-z]{2}$')
+                      AND REGEXP_LIKE(s.subpartition_name, '(^|_)S' || UPPER(p_country) || '(_|$)', 'i') )
+                  )
+
               AND NOT EXISTS (
                   SELECT 1
                   FROM fdr_new.hwm_log l
@@ -85,8 +111,18 @@ BEGIN
                         FROM dba_tab_subpartitions s
                         WHERE s.table_owner = p_schema
                           AND s.table_name = v_table_name
-                          AND s.partition_name = v_partition_name
-                          AND (p_country is null or s.subpartition_name like '%' || p_country || '%')
+                          AND s.partition_name = v_partition_name                       
+--                          AND (p_country IS NULL OR s.subpartition_name LIKE '%' || p_country || '%')
+                         AND (
+                                ( p_country IS NULL
+                                  AND REGEXP_LIKE(s.subpartition_name, '(^|_)S[0-9]+(_|$)', 'i')
+                                  AND NOT REGEXP_LIKE(s.subpartition_name, '(^|_)S(UK|PL|RO|ES)(_|$)', 'i') )
+                             OR ( REGEXP_LIKE(p_country, '^[0-9]+$')
+                                  AND REGEXP_LIKE(s.subpartition_name, '(^|_)S' || p_country || '(_|$)', 'i') )
+                             OR ( REGEXP_LIKE(p_country, '^[A-Za-z]{2}$')
+                                  AND REGEXP_LIKE(s.subpartition_name, '(^|_)S' || UPPER(p_country) || '(_|$)', 'i') )
+                              )
+
                           AND NOT EXISTS (
                               SELECT 1
                               FROM fdr_new.hwm_log l
@@ -333,6 +369,5 @@ BEGIN
             END;
         END LOOP;
     END LOOP;
-
 
 END reset_hwm_for_schema;
