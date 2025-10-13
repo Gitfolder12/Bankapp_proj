@@ -1,0 +1,27 @@
+SELECT
+    l.owner,
+    l.base_table,
+    -- Completed counts
+    COUNT(DISTINCT CASE WHEN l.object_type = 'PARTITION' AND l.status = 'SUCCESS' THEN l.object_name END) AS partitions_completed,
+    COUNT(DISTINCT CASE WHEN l.object_type = 'SUBPARTITION' AND l.status = 'SUCCESS' THEN l.object_name END) AS subpartitions_completed,
+    -- Remaining = total - completed
+    COUNT(DISTINCT p.partition_name)
+        - COUNT(DISTINCT CASE WHEN l.object_type = 'PARTITION' AND l.status = 'SUCCESS' THEN l.object_name END)
+        AS partitions_remaining,
+    COUNT(DISTINCT sp.subpartition_name)
+        - COUNT(DISTINCT CASE WHEN l.object_type = 'SUBPARTITION' AND l.status = 'SUCCESS' THEN l.object_name END)
+        AS subpartitions_remaining
+FROM
+    hr.hwm_log l
+    LEFT JOIN dba_tab_partitions p
+        ON l.base_table = p.table_name
+        AND l.owner = p.table_owner
+    LEFT JOIN dba_tab_subpartitions sp
+        ON l.base_table = sp.table_name
+        AND l.owner = sp.table_owner
+GROUP BY
+    l.owner,
+    l.base_table
+ORDER BY
+    l.owner,
+    l.base_table;
