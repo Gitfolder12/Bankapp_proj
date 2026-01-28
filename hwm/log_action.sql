@@ -1,0 +1,104 @@
+create or replace PROCEDURE log_action (
+    p_owner        IN VARCHAR2,
+    p_base_table   IN VARCHAR2,
+    p_object_name  IN VARCHAR2,
+    p_object_type  IN VARCHAR2,
+    p_status       IN VARCHAR2,
+    p_error_msg    IN VARCHAR2 DEFAULT NULL
+) IS
+    v_total_parts       NUMBER := 0;
+    v_done_parts        NUMBER := 0;
+    v_total_subparts    NUMBER := 0;
+    v_done_subparts     NUMBER := 0;
+    v_left_parts        NUMBER := 0;
+    v_left_subparts     NUMBER := 0;
+    v_total_all         NUMBER := 0;
+    v_done_all          NUMBER := 0;
+    v_left_all          NUMBER := 0;
+    v_pct_done          NUMBER := 0;
+    v_desc_txt          VARCHAR2(4000);
+BEGIN
+    -----------------------------------------------------------------
+    -- Count partitions
+    -----------------------------------------------------------------
+    SELECT COUNT(*) INTO v_total_parts
+    FROM dba_tab_partitions
+    WHERE table_owner = p_owner
+      AND table_name  = p_base_table;
+
+    SELECT COUNT(*) INTO v_done_parts
+    FROM hr.hwm_log
+    WHERE owner       = p_owner
+      AND base_table  = p_base_table
+      AND object_type = 'PARTITION'
+      AND status      = 'SUCCESS';
+
+    v_left_parts := v_total_parts - v_done_parts;
+
+    -----------------------------------------------------------------
+    -- Count subpartitions
+    -----------------------------------------------------------------
+    SELECT COUNT(*) INTO v_total_subparts
+    FROM dba_tab_subpartitions
+    WHERE table_owner = p_owner
+      AND table_name  = p_base_table;
+
+    SELECT COUNT(*) INTO v_done_subparts
+    FROM hr.hwm_log
+    WHERE owner       = p_owner
+      AND base_table  = p_base_table
+      AND object_type = 'SUBPARTITION'
+      AND status      = 'SUCCESS';
+
+    v_left_subparts := v_total_subparts - v_done_subparts;
+
+    -----------------------------------------------------------------
+    -- Calculate overall progress
+    -----------------------------------------------------------------
+    v_total_all := v_total_parts + v_total_subparts;
+    v_done_all  := v_done_parts + v_done_subparts;
+    v_left_all  := v_total_all - v_done_all;
+
+    IF v_total_all > 0 THEN
+        v_pct_done := ROUND((v_done_all / v_total_all) * 100, 2);
+    ELSE
+        v_pct_done := 0;
+    END IF;
+
+    -----------------------------------------------------------------
+    -- Build human-readable description text
+    -----------------------------------------------------------------
+    v_desc_txt :=
+          'Progress: ' || v_pct_done || '% (' || v_done_all || ' of ' || v_total_all || ' complete)'
+       || ' — Partitions ' || v_done_parts || '/' || v_total_parts
+       || ', Subpartitions ' || v_done_subparts || '/' || v_total_subparts
+       || ', ' || v_left_all || ' left.';
+
+    -----------------------------------------------------------------
+    -- Insert log row
+    -----------------------------------------------------------------
+    INSERT INTO hr.hwm_log (
+        log_id,
+        owner,
+        base_table,
+        object_name,
+        object_type,
+        status,
+        error_msg,
+        desc_txt
+    ) VALUES (
+        hr.hwm_log_seq.NEXTVAL,
+        p_owner,
+        p_base_table,
+        p_object_name,
+        p_object_type,
+        p_status,
+        p_error_msg,
+        v_desc_txt
+    );
+
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Log failed: ' || SQLERRM);
+END log_action;
