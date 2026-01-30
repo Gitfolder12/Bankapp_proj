@@ -1,137 +1,133 @@
-create or replace PROCEDURE copy_subpartitions_step (
-    p_owner     IN VARCHAR2,
-    p_src_table IN VARCHAR2,
-    p_dst_table IN VARCHAR2,
-    p_parallel  IN PLS_INTEGER DEFAULT 16
+--------------------------------------------------------
+--  File created - Friday-January-30-2026   
+--------------------------------------------------------
+--------------------------------------------------------
+--  DDL for Procedure LOAD_SUBPARTITIONS
+--------------------------------------------------------
+set define off;
+
+  CREATE OR REPLACE EDITIONABLE PROCEDURE "CR"."LOAD_SUBPARTITIONS" (
+    p_src_owner    IN VARCHAR2,
+    p_dst_owner    IN VARCHAR2,
+    p_src_table    IN VARCHAR2,
+    p_dst_table    IN VARCHAR2,
+    p_parallel     IN PLS_INTEGER DEFAULT 8,
+    p_max_runtime  IN NUMBER DEFAULT 60
 ) IS
-    l_owner     VARCHAR2(30)  := UPPER(p_owner);
-    l_src_table VARCHAR2(128) := UPPER(p_src_table);
-    l_dst_table VARCHAR2(128) := UPPER(p_dst_table);
-    l_dummy     NUMBER;
-    v_error_msg VARCHAR2(4000);
-    v_start_time NUMBER;
-    v_execution_time NUMBER;
-    v_rows_copied NUMBER;
+    l_dummy      NUMBER;
+    l_src_cnt    NUMBER := 0;
+    l_trg_cnt    NUMBER := 0;
+    v_start_time INTEGER := DBMS_UTILITY.GET_TIME;
+
+    ex_runtime_exceeded EXCEPTION;
+    PRAGMA EXCEPTION_INIT(ex_runtime_exceeded, -20001);
+
+    PROCEDURE check_runtime IS
+    BEGIN
+        IF (DBMS_UTILITY.GET_TIME - v_start_time)/100 > (p_max_runtime*60) THEN
+            RAISE ex_runtime_exceeded;
+        END IF;
+    END;
 BEGIN
-    
-    -- Enable NOLOGGING on target table for better performance
-    EXECUTE IMMEDIATE 'ALTER TABLE ' || l_owner || '.' || l_dst_table || ' NOLOGGING';
-    
-    -- Drop LOCAL indexes on target table before copy
-    FOR idx IN (SELECT index_name, locality FROM dba_indexes 
-                WHERE table_owner = l_owner AND table_name = l_dst_table AND uniqueness = 'NONUNIQUE' AND locality = 'LOCAL')
-    LOOP
-        BEGIN
-            EXECUTE IMMEDIATE 'DROP INDEX ' || l_owner || '.' || idx.index_name;
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-    END LOOP;
-    
-    -- Enable parallel DML and optimize for large data volumes
     EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
-    EXECUTE IMMEDIATE 'ALTER SESSION SET PARALLEL_MIN_PERCENT = 0';
-    EXECUTE IMMEDIATE 'ALTER SESSION SET PARALLEL_EXECUTION_MESSAGE_SIZE = 16384';
 
-    FOR r IN (
-        SELECT s.subpartition_name
-        FROM   dba_tab_subpartitions s
-        JOIN   dba_tables t ON s.table_owner = t.owner AND s.table_name = t.table_name
-        WHERE  s.table_owner = l_owner
-        AND    s.table_name  = l_src_table
-        AND    t.subpartitioned = 'YES'
-        ORDER  BY s.partition_position, s.subpartition_position
-    )
-    LOOP
-        ------------------------------------------------------------
-        -- Skip already copied subpartitions
-        ------------------------------------------------------------
+    FOR sp IN (
+        SELECT partition_name, subpartition_name
+        FROM dba_tab_subpartitions
+        WHERE table_owner = UPPER(p_src_owner)
+          AND table_name  = UPPER(p_src_table)
+        ORDER BY partition_position, subpartition_position
+    ) LOOP
+        check_runtime;
+
+        -- Skip already successful subpartitions
         BEGIN
-            SELECT 1
-            INTO   l_dummy
-            FROM   hwm_copy_log
-            WHERE  owner       = l_owner
-            AND    src_table   = l_src_table
-            AND    object_name = r.subpartition_name
-            AND    dst_table   = l_dst_table
-            AND    status      = 'SUCCESS';
-
-            DBMS_OUTPUT.PUT_LINE('>>> Skipping ' || r.subpartition_name || ' (already done)' );
+            SELECT 1 INTO l_dummy
+            FROM hwm_copy_log
+            WHERE p_src_owner = UPPER(p_src_owner)
+              AND src_table  = UPPER(p_src_table)
+              AND p_dst_owner = UPPER(p_dst_owner)
+              AND dst_table  = UPPER(p_dst_table)
+              AND object_name = sp.subpartition_name
+              AND status = 'SUCCESS';
+            DBMS_OUTPUT.PUT_LINE('Skipping subpartition ' || sp.subpartition_name || ' (already loaded)');
             CONTINUE;
         EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                NULL;
+            WHEN NO_DATA_FOUND THEN NULL;
         END;
 
         BEGIN
+            -- Idempotent restart: truncate target subpartition
+            EXECUTE IMMEDIATE 'ALTER TABLE ' || p_dst_owner || '.' || p_dst_table ||
+                              ' TRUNCATE SUBPARTITION "' || sp.subpartition_name || '"';
+
+            -- Load subpartition
             EXECUTE IMMEDIATE '
-                INSERT /*+ APPEND PARALLEL(' || l_dst_table || ',' || p_parallel || ') NOLOGGING */
-                INTO ' || l_owner || '.' || l_dst_table ||
-                ' SUBPARTITION (' || r.subpartition_name || ')
-                SELECT /*+ PARALLEL(' || l_src_table || ',' || p_parallel || ') FULL */ *
-                FROM   ' || l_owner || '.' || l_src_table ||
-                ' SUBPARTITION (' || r.subpartition_name || ')
-            ';
+                INSERT /*+ APPEND PARALLEL(' || p_parallel || ') */
+                INTO ' || p_dst_owner || '.' || p_dst_table || ' SUBPARTITION("' || sp.subpartition_name || '")
+                SELECT /*+ PARALLEL(' || p_parallel || ') */ *
+                FROM ' || p_src_owner || '.' || p_src_table || ' SUBPARTITION("' || sp.subpartition_name || '")';
 
-            log_hwm_copy(
-                p_owner       => l_owner,
-                p_src_table   => l_src_table,
-                p_object_name => r.subpartition_name,
-                p_dst_table   => l_dst_table,
-                p_status      => 'SUCCESS'
-            );
-
+            l_trg_cnt := SQL%ROWCOUNT;
             COMMIT;
 
-            DBMS_OUTPUT.PUT_LINE('    -> ' || r.subpartition_name || ' copied' );
+            -- Validate row count
+            EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_src_owner || '.' || p_src_table ||
+                              ' SUBPARTITION("' || sp.subpartition_name || '")' INTO l_src_cnt;
+
+            IF l_src_cnt = l_trg_cnt THEN
+                log_hwm_copy(
+                    p_src_owner   => p_src_owner,
+                    p_src_table   => p_src_table,
+                    p_object_name => sp.subpartition_name,
+                    p_dst_owner   => p_dst_owner,
+                    p_dst_table   => p_dst_table,
+                    p_status      => 'SUCCESS',
+                    p_src_cnt     => l_src_cnt,
+                    p_trg_cnt     => l_trg_cnt,
+                    p_action_ts   => SYSDATE
+                );
+                DBMS_OUTPUT.PUT_LINE('Subpartition ' || sp.subpartition_name || ' loaded successfully (rows=' || l_trg_cnt || ')');
+            ELSE
+                ROLLBACK;
+                log_hwm_copy(
+                    p_src_owner   => p_src_owner,
+                    p_src_table   => p_src_table,
+                    p_object_name => sp.subpartition_name,
+                    p_dst_owner   => p_dst_owner,
+                    p_dst_table   => p_dst_table,
+                    p_status      => 'ERROR',
+                    p_error_msg   => 'Row mismatch: src='||l_src_cnt||', trg='||l_trg_cnt,
+                    p_src_cnt     => l_src_cnt,
+                    p_trg_cnt     => l_trg_cnt,
+                    p_action_ts   => SYSDATE
+                );
+                RAISE_APPLICATION_ERROR(-20002,'Row mismatch on subpartition ' || sp.subpartition_name);
+            END IF;
 
         EXCEPTION
             WHEN OTHERS THEN
-                log_hwm_copy(
-                    p_owner       => l_owner,
-                    p_src_table   => l_src_table,
-                    p_object_name => r.subpartition_name,
-                    p_dst_table   => l_dst_table,
-                    p_status      => 'ERROR',
-                    p_error_msg   => SQLERRM
-                );
-
                 ROLLBACK;
+                log_hwm_copy(
+                    p_src_owner   => p_src_owner,
+                    p_src_table   => p_src_table,
+                    p_object_name => sp.subpartition_name,
+                    p_dst_owner   => p_dst_owner,
+                    p_dst_table   => p_dst_table,
+                    p_status      => 'ERROR',
+                    p_error_msg   => SQLERRM,
+                    p_src_cnt     => l_src_cnt,
+                    p_trg_cnt     => l_trg_cnt,
+                    p_action_ts   => SYSDATE
+                );
                 RAISE;
         END;
+
     END LOOP;
-    
-    -- Re-enable LOGGING on target table
-    EXECUTE IMMEDIATE 'ALTER TABLE ' || l_owner || '.' || l_dst_table || ' LOGGING';
-    
-    -- Recreate LOCAL indexes on target table (GLOBAL indexes remain intact)
-    FOR idx IN (SELECT index_name, locality
-                FROM dba_indexes 
-                WHERE table_owner = l_owner 
-                AND table_name = l_src_table 
-                AND uniqueness = 'NONUNIQUE'
-                AND locality = 'LOCAL'
-                ORDER BY index_name)
-    LOOP
-        BEGIN
-            -- Get index DDL from source and apply to destination table
-            DECLARE
-                v_index_ddl VARCHAR2(4000);
-                v_new_index_name VARCHAR2(128);
-            BEGIN
-                v_new_index_name := idx.index_name || '_nw';
-                v_index_ddl := DBMS_METADATA.GET_DDL('INDEX', idx.index_name, l_owner);
-                -- Replace source table reference with destination table and index name
-                v_index_ddl := REPLACE(v_index_ddl, l_src_table, l_dst_table);
-                v_index_ddl := REPLACE(v_index_ddl, 'CREATE INDEX ' || l_owner || '.' || idx.index_name, 
-                                                     'CREATE INDEX ' || l_owner || '.' || v_new_index_name);
-                EXECUTE IMMEDIATE v_index_ddl;
-                DBMS_OUTPUT.PUT_LINE('Recreated LOCAL index: ' || v_new_index_name);
-            END;
-        EXCEPTION WHEN OTHERS THEN 
-            DBMS_OUTPUT.PUT_LINE('Error recreating index ' || idx.index_name || ': ' || SQLERRM);
-        END;
-    END LOOP;
-    
-    DBMS_OUTPUT.PUT_LINE('Subpartition copy and index recreation completed successfully');
-    
-END;
+
+EXCEPTION
+    WHEN ex_runtime_exceeded THEN
+        DBMS_OUTPUT.PUT_LINE('Maximum runtime of ' || p_max_runtime || ' minutes reached. Exiting load subpartitions.');
+END load_subpartitions;
+
+/

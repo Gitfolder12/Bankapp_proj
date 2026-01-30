@@ -1,24 +1,44 @@
+--------------------------------------------------------
+--  File created - Friday-January-30-2026   
+--------------------------------------------------------
+--------------------------------------------------------
+--  DDL for Procedure LOG_HWM_COPY
+--------------------------------------------------------
+set define off;
 
-  CREATE TABLE "CR"."HWM_COPY_LOG" 
-   (	"OWNER" VARCHAR2(30 BYTE), 
-	"SRC_TABLE" VARCHAR2(128 BYTE), 
-	"OBJECT_NAME" VARCHAR2(128 BYTE), 
-	"DST_TABLE" VARCHAR2(128 BYTE), 
-	"COPIED_AT" DATE, 
-	"STATUS" VARCHAR2(20 BYTE), 
-	"ERROR_MSG" VARCHAR2(4000 BYTE)
-   ) SEGMENT CREATION IMMEDIATE 
-  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 
- NOCOMPRESS LOGGING
-  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
-  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
-  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
-  TABLESPACE "CR_DATA" ;
+  CREATE OR REPLACE EDITIONABLE PROCEDURE "CR"."LOG_HWM_COPY" (
+    p_owner        IN VARCHAR2,
+    p_src_table    IN VARCHAR2,
+    p_object_name  IN VARCHAR2,   -- partition or subpartition
+    p_dst_table    IN VARCHAR2,
+    p_status       IN VARCHAR2,
+    p_error_msg    IN VARCHAR2 DEFAULT NULL,
+    p_src_cnt      IN NUMBER   DEFAULT NULL,
+    p_trg_cnt      IN NUMBER   DEFAULT NULL
+) IS
+BEGIN
+    INSERT INTO CR.hwm_copy_log (
+        owner,
+        src_table,
+        object_name,
+        dst_table,
+        copied_at,
+        status,
+        error_msg,
+        src_row_count,
+        trg_row_count
+    )
+    VALUES (
+        UPPER(p_owner),
+        UPPER(p_src_table),
+        p_object_name,
+        UPPER(p_dst_table),
+        SYSDATE,
+        UPPER(p_status),
+        SUBSTR(p_error_msg, 1, 4000),
+        p_src_cnt,
+        p_trg_cnt
+    );
+END;
 
-  CREATE INDEX "CR"."HWM_COPY_LOG_IX1" ON "CR"."HWM_COPY_LOG" ("OWNER", "SRC_TABLE", "OBJECT_NAME", "DST_TABLE", "STATUS") 
-  PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS 
-  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
-  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
-  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
-  TABLESPACE "CR_DATA" ;
-
+/

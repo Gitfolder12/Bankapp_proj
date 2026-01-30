@@ -1,4 +1,12 @@
-create or replace PROCEDURE log_action (
+--------------------------------------------------------
+--  File created - Friday-January-30-2026   
+--------------------------------------------------------
+--------------------------------------------------------
+--  DDL for Procedure LOG_ACTION
+--------------------------------------------------------
+set define off;
+
+  CREATE OR REPLACE EDITIONABLE PROCEDURE "CR"."LOG_ACTION" (
     p_owner        IN VARCHAR2,
     p_base_table   IN VARCHAR2,
     p_object_name  IN VARCHAR2,
@@ -27,7 +35,7 @@ BEGIN
       AND table_name  = p_base_table;
 
     SELECT COUNT(*) INTO v_done_parts
-    FROM hr.hwm_log
+    FROM cr.hwm_log
     WHERE owner       = p_owner
       AND base_table  = p_base_table
       AND object_type = 'PARTITION'
@@ -44,7 +52,7 @@ BEGIN
       AND table_name  = p_base_table;
 
     SELECT COUNT(*) INTO v_done_subparts
-    FROM hr.hwm_log
+    FROM cr.hwm_log
     WHERE owner       = p_owner
       AND base_table  = p_base_table
       AND object_type = 'SUBPARTITION'
@@ -70,14 +78,14 @@ BEGIN
     -----------------------------------------------------------------
     v_desc_txt :=
           'Progress: ' || v_pct_done || '% (' || v_done_all || ' of ' || v_total_all || ' complete)'
-       || ' â€” Partitions ' || v_done_parts || '/' || v_total_parts
+       || ' — Partitions ' || v_done_parts || '/' || v_total_parts
        || ', Subpartitions ' || v_done_subparts || '/' || v_total_subparts
        || ', ' || v_left_all || ' left.';
 
     -----------------------------------------------------------------
     -- Insert log row
     -----------------------------------------------------------------
-    INSERT INTO hr.hwm_log (
+    INSERT INTO cr.hwm_log (
         log_id,
         owner,
         base_table,
@@ -87,7 +95,7 @@ BEGIN
         error_msg,
         desc_txt
     ) VALUES (
-        hr.hwm_log_seq.NEXTVAL,
+        cr.hwm_log_seq.NEXTVAL,
         p_owner,
         p_base_table,
         p_object_name,
@@ -102,3 +110,5 @@ EXCEPTION
     WHEN OTHERS THEN
         DBMS_OUTPUT.PUT_LINE('Log failed: ' || SQLERRM);
 END log_action;
+
+/
