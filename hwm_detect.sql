@@ -24,7 +24,6 @@ COMMENT ON COLUMN reclaim_pct IS 'Percentage of reclaimable space';
 COMMENT ON COLUMN status IS 'HWM status: HWM_ISSUE or ERROR';
 
 
-
 CREATE OR REPLACE PROCEDURE prc_identify_hwm_issues (
     p_owner              IN VARCHAR2 DEFAULT USER,
     p_table_name         IN VARCHAR2 DEFAULT NULL,  -- optional filter
@@ -32,21 +31,7 @@ CREATE OR REPLACE PROCEDURE prc_identify_hwm_issues (
     p_reclaim_threshold  IN NUMBER   DEFAULT 30     -- percent threshold
 )
 IS
-    CURSOR c_partitions IS
-        SELECT p.table_owner,
-               p.table_name,
-               p.partition_name,
-               s.bytes
-        FROM   dba_tab_partitions p
-        JOIN   dba_segments s
-               ON s.owner = p.table_owner
-              AND s.segment_name = p.table_name
-              AND s.partition_name = p.partition_name
-              AND s.segment_type = 'TABLE PARTITION'
-        WHERE  p.table_owner = UPPER(p_owner)
-          AND  (p_table_name IS NULL OR p.table_name = UPPER(p_table_name))
-          AND  s.bytes >= p_min_size_mb * 1024 * 1024;
-
+    -- Variables for DBMS_SPACE
     l_total_blocks       NUMBER;
     l_total_bytes        NUMBER;
     l_unused_blocks      NUMBER;
@@ -57,10 +42,22 @@ IS
     l_reclaim_pct        NUMBER;
 
 BEGIN
-
-    FOR r IN c_partitions LOOP
+    -- =============================
+    -- 1️⃣ Loop over partitions
+    -- =============================
+    FOR r IN (
+        SELECT p.table_owner, p.table_name, p.partition_name, s.bytes
+        FROM dba_tab_partitions p
+        JOIN dba_segments s
+            ON s.owner = p.table_owner
+           AND s.segment_name = p.table_name
+           AND s.partition_name = p.partition_name
+           AND s.segment_type = 'TABLE PARTITION'
+        WHERE p.table_owner = UPPER(p_owner)
+          AND (p_table_name IS NULL OR p.table_name = UPPER(p_table_name))
+          AND s.bytes >= p_min_size_mb * 1024 * 1024
+    ) LOOP
         BEGIN
-            -- Get unused space for partition
             DBMS_SPACE.UNUSED_SPACE(
                 segment_owner             => r.table_owner,
                 segment_name              => r.table_name,
@@ -75,14 +72,12 @@ BEGIN
                 last_used_block           => l_last_used_block_id
             );
 
-            -- Calculate reclaimable %
             IF l_total_bytes > 0 THEN
                 l_reclaim_pct := ROUND((l_unused_bytes / l_total_bytes) * 100, 2);
             ELSE
                 l_reclaim_pct := 0;
             END IF;
 
-            -- Log only if reclaim % exceeds threshold
             IF l_reclaim_pct >= p_reclaim_threshold THEN
                 INSERT INTO hwm_audit_log (
                     log_date, owner, table_name, partition_name,
@@ -101,7 +96,6 @@ BEGIN
 
         EXCEPTION
             WHEN OTHERS THEN
-                -- Log errors but continue
                 INSERT INTO hwm_audit_log (
                     log_date, owner, table_name, partition_name,
                     allocated_mb, unused_mb, reclaim_pct, status
@@ -110,6 +104,78 @@ BEGIN
                     r.table_owner,
                     r.table_name,
                     r.partition_name,
+                    NULL,
+                    NULL,
+                    NULL,
+                    'ERROR'
+                );
+        END;
+    END LOOP;
+
+    -- =============================
+    -- 2️⃣ Loop over subpartitions
+    -- =============================
+    FOR r IN (
+        SELECT sp.table_owner, sp.table_name, sp.subpartition_name, s.bytes
+        FROM dba_tab_subpartitions sp
+        JOIN dba_segments s
+            ON s.owner = sp.table_owner
+           AND s.segment_name = sp.table_name
+           AND s.segment_name = sp.table_name
+           AND s.partition_name = sp.partition_name
+           AND s.subpartition_name = sp.subpartition_name
+           AND s.segment_type = 'TABLE SUBPARTITION'
+        WHERE sp.table_owner = UPPER(p_owner)
+          AND (p_table_name IS NULL OR sp.table_name = UPPER(p_table_name))
+          AND s.bytes >= p_min_size_mb * 1024 * 1024
+    ) LOOP
+        BEGIN
+            DBMS_SPACE.UNUSED_SPACE(
+                segment_owner             => r.table_owner,
+                segment_name              => r.table_name,
+                segment_type              => 'TABLE SUBPARTITION',
+                subpartition_name         => r.subpartition_name,
+                total_blocks              => l_total_blocks,
+                total_bytes               => l_total_bytes,
+                unused_blocks             => l_unused_blocks,
+                unused_bytes              => l_unused_bytes,
+                last_used_extent_file_id  => l_last_used_extent,
+                last_used_extent_block_id => l_last_used_block,
+                last_used_block           => l_last_used_block_id
+            );
+
+            IF l_total_bytes > 0 THEN
+                l_reclaim_pct := ROUND((l_unused_bytes / l_total_bytes) * 100, 2);
+            ELSE
+                l_reclaim_pct := 0;
+            END IF;
+
+            IF l_reclaim_pct >= p_reclaim_threshold THEN
+                INSERT INTO hwm_audit_log (
+                    log_date, owner, table_name, partition_name,
+                    allocated_mb, unused_mb, reclaim_pct, status
+                ) VALUES (
+                    SYSDATE,
+                    r.table_owner,
+                    r.table_name,
+                    r.subpartition_name,   -- log subpartition as partition_name
+                    ROUND(l_total_bytes / 1024 / 1024, 2),
+                    ROUND(l_unused_bytes / 1024 / 1024, 2),
+                    l_reclaim_pct,
+                    'HWM_ISSUE'
+                );
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                INSERT INTO hwm_audit_log (
+                    log_date, owner, table_name, partition_name,
+                    allocated_mb, unused_mb, reclaim_pct, status
+                ) VALUES (
+                    SYSDATE,
+                    r.table_owner,
+                    r.table_name,
+                    r.subpartition_name,
                     NULL,
                     NULL,
                     NULL,
