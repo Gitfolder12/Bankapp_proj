@@ -1,0 +1,101 @@
+DECLARE
+    l_unformatted_blocks NUMBER;
+    l_unformatted_bytes  NUMBER;
+    l_fs1_blocks NUMBER;
+    l_fs1_bytes  NUMBER;
+    l_fs2_blocks NUMBER;
+    l_fs2_bytes  NUMBER;
+    l_fs3_blocks NUMBER;
+    l_fs3_bytes  NUMBER;
+    l_fs4_blocks NUMBER;
+    l_fs4_bytes  NUMBER;
+    l_full_blocks NUMBER;
+    l_full_bytes  NUMBER;
+BEGIN
+    DBMS_SPACE.SPACE_USAGE(
+        segment_owner      => 'CR',
+        segment_name       => 'DEPARTMENTS',
+        segment_type       => 'TABLE PARTITION',
+        partition_name     => 'P4',
+        unformatted_blocks => l_unformatted_blocks,
+        unformatted_bytes  => l_unformatted_bytes,
+        fs1_blocks         => l_fs1_blocks,
+        fs1_bytes          => l_fs1_bytes,
+        fs2_blocks         => l_fs2_blocks,
+        fs2_bytes          => l_fs2_bytes,
+        fs3_blocks         => l_fs3_blocks,
+        fs3_bytes          => l_fs3_bytes,
+        fs4_blocks         => l_fs4_blocks,
+        fs4_bytes          => l_fs4_bytes,
+        full_blocks        => l_full_blocks,
+        full_bytes         => l_full_bytes
+    );
+
+    DBMS_OUTPUT.PUT_LINE('0-25% blocks: ' || l_fs1_blocks);
+    DBMS_OUTPUT.PUT_LINE('25-50% blocks: ' || l_fs2_blocks);
+    DBMS_OUTPUT.PUT_LINE('50-75% blocks: ' || l_fs3_blocks);
+    DBMS_OUTPUT.PUT_LINE('75-100% blocks: ' || l_fs4_blocks);
+    DBMS_OUTPUT.PUT_LINE('Full blocks: ' || l_full_blocks);
+END;
+/
+
+
+
+create or replace PROCEDURE detect_hwm_candidates(
+    p_owner IN VARCHAR2
+)
+IS
+    l_unformatted_blocks NUMBER;
+    l_unformatted_bytes  NUMBER;
+    l_fs1_blocks NUMBER;
+    l_fs1_bytes  NUMBER;
+    l_fs2_blocks NUMBER;
+    l_fs2_bytes  NUMBER;
+    l_fs3_blocks NUMBER;
+    l_fs3_bytes  NUMBER;
+    l_fs4_blocks NUMBER;
+    l_fs4_bytes  NUMBER;
+    l_full_blocks NUMBER;
+    l_full_bytes  NUMBER;
+BEGIN
+    FOR r IN (
+        SELECT table_name, partition_name
+        FROM dba_tab_partitions
+        WHERE table_owner = UPPER(p_owner)
+    )
+    LOOP
+        BEGIN
+            DBMS_SPACE.SPACE_USAGE(
+                segment_owner      => p_owner,
+                segment_name       => r.table_name,
+                segment_type       => 'TABLE PARTITION',
+                partition_name     => r.partition_name,
+                unformatted_blocks => l_unformatted_blocks,
+                unformatted_bytes  => l_unformatted_bytes,
+                fs1_blocks         => l_fs1_blocks,
+                fs1_bytes          => l_fs1_bytes,
+                fs2_blocks         => l_fs2_blocks,
+                fs2_bytes          => l_fs2_bytes,
+                fs3_blocks         => l_fs3_blocks,
+                fs3_bytes          => l_fs3_bytes,
+                fs4_blocks         => l_fs4_blocks,
+                fs4_bytes          => l_fs4_bytes,
+                full_blocks        => l_full_blocks,
+                full_bytes         => l_full_bytes
+            );
+
+            -- Just display the FS block info
+            DBMS_OUTPUT.PUT_LINE('Table: ' || r.table_name || ' Partition: ' || r.partition_name);
+            DBMS_OUTPUT.PUT_LINE('0-25% blocks: ' || l_fs1_blocks);
+            DBMS_OUTPUT.PUT_LINE('25-50% blocks: ' || l_fs2_blocks);
+            DBMS_OUTPUT.PUT_LINE('50-75% blocks: ' || l_fs3_blocks);
+            DBMS_OUTPUT.PUT_LINE('75-100% blocks: ' || l_fs4_blocks);
+            DBMS_OUTPUT.PUT_LINE('Full blocks: ' || l_full_blocks);
+            DBMS_OUTPUT.PUT_LINE('-------------------------------');
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('Error on ' || r.table_name || ' partition ' || r.partition_name || ': ' || SQLERRM);
+        END;
+    END LOOP;
+END detect_hwm_candidates;
