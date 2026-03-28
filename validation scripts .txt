@@ -1,0 +1,137 @@
+DECLARE
+    v_tbs   VARCHAR2(128) := 'HWM_NEW_DATA';  -- target tablespace
+    v_owner VARCHAR2(128) := 'CR';            -- schema
+BEGIN
+    FOR tbl IN (
+        SELECT t.owner,
+               t.table_name,
+               t.partitioned,
+               pt.subpartitioning_type
+        FROM dba_tables t
+        LEFT JOIN dba_part_tables pt
+               ON pt.owner = t.owner
+              AND pt.table_name = t.table_name
+        WHERE t.owner = v_owner
+          AND t.partitioned = 'YES'
+    )
+    LOOP
+        BEGIN
+            -- Subpartitioned tables
+            IF tbl.subpartitioning_type IS NOT NULL THEN
+
+                EXECUTE IMMEDIATE
+                    'ALTER TABLE ' || tbl.owner || '.' || tbl.table_name ||
+                    ' MODIFY DEFAULT ATTRIBUTES TABLESPACE ' || v_tbs ||
+                    ' MODIFY DEFAULT ATTRIBUTES FOR SUBPARTITIONS TABLESPACE ' || v_tbs;
+
+            -- Partitioned only
+            ELSE
+
+                EXECUTE IMMEDIATE
+                    'ALTER TABLE ' || tbl.owner || '.' || tbl.table_name ||
+                    ' MODIFY DEFAULT ATTRIBUTES TABLESPACE ' || v_tbs;
+
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('Error on ' || tbl.table_name || ' : ' || SQLERRM);
+        END;
+    END LOOP;
+END;
+/
+
+
+---index 
+
+DECLARE
+    v_tbs   VARCHAR2(128) := 'HWM_NEW_DATA';  -- target tablespace
+    v_owner VARCHAR2(128) := 'CR';            -- schema
+BEGIN
+    FOR idx IN (
+        SELECT i.owner,
+               i.index_name,
+               i.partitioned,
+               pi.subpartitioning_type
+        FROM dba_indexes i
+        LEFT JOIN dba_part_indexes pi
+               ON pi.owner = i.owner
+              AND pi.index_name = i.index_name
+        WHERE i.owner = v_owner
+          AND i.partitioned = 'YES'
+    )
+    LOOP
+        BEGIN
+            -- 🔹 Subpartitioned indexes
+            IF idx.subpartitioning_type IS NOT NULL THEN
+
+                EXECUTE IMMEDIATE
+                    'ALTER INDEX ' || idx.owner || '.' || idx.index_name ||
+                    ' MODIFY DEFAULT ATTRIBUTES TABLESPACE ' || v_tbs ||
+                    ' MODIFY DEFAULT ATTRIBUTES FOR SUBPARTITIONS TABLESPACE ' || v_tbs;
+
+            -- 🔹 Partitioned indexes
+            ELSE
+
+                EXECUTE IMMEDIATE
+                    'ALTER INDEX ' || idx.owner || '.' || idx.index_name ||
+                    ' MODIFY DEFAULT ATTRIBUTES TABLESPACE ' || v_tbs;
+
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('Error on index ' || idx.index_name || ' : ' || SQLERRM);
+        END;
+    END LOOP;
+END;
+/
+
+
+SELECT tablespace_name,
+       ROUND(SUM(bytes)/1024/1024/1024,2) AS total_gb
+FROM dba_data_files
+GROUP BY tablespace_name
+ORDER BY 1;
+
+SELECT df.tablespace_name,
+       ROUND(SUM(df.bytes)/1024/1024/1024,2) AS total_gb,
+       ROUND(SUM(fs.bytes)/1024/1024/1024,2) AS free_gb,
+       ROUND((SUM(df.bytes)-SUM(fs.bytes))/1024/1024/1024,2) AS used_gb
+FROM dba_data_files df
+LEFT JOIN dba_free_space fs
+       ON df.tablespace_name = fs.tablespace_name
+GROUP BY df.tablespace_name
+ORDER BY 1;
+
+
+SELECT tablespace_name,
+       ROUND(SUM(bytes)/1024/1024/1024,2) AS used_gb
+FROM dba_segments
+GROUP BY tablespace_name
+ORDER BY 1;
+
+---DATAFILE HWM (MOST IMPORTANT)
+WITH hwm AS (
+    SELECT file_id,
+           MAX(block_id + blocks - 1) AS hwm_block
+    FROM dba_extents
+    GROUP BY file_id
+)
+SELECT df.tablespace_name,
+       df.file_name,
+       ROUND(df.bytes/1024/1024/1024,2) AS file_size_gb,
+       ROUND((h.hwm_block * ts.block_size)/1024/1024/1024,2) AS min_possible_gb,
+       ROUND((df.bytes - (h.hwm_block * ts.block_size))/1024/1024/1024,2) AS reclaimable_gb
+FROM dba_data_files df
+JOIN hwm h ON df.file_id = h.file_id
+JOIN dba_tablespaces ts ON df.tablespace_name = ts.tablespace_name
+ORDER BY df.tablespace_name;
+
+
+---SELECT tablespace_name,
+       COUNT(*) AS segment_count
+FROM dba_segments
+WHERE owner = 'CR'
+GROUP BY tablespace_name
+ORDER BY 1;
