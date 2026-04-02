@@ -1,0 +1,189 @@
+create or replace PROCEDURE hwm_move_tables (
+    p_schema       IN VARCHAR2,
+    p_table_tbs    IN VARCHAR2,
+    p_index_tbs    IN VARCHAR2,
+    p_max_runtime  IN NUMBER DEFAULT 160
+)
+AUTHID CURRENT_USER
+IS
+    -- Runtime control
+    v_start_time   INTEGER := DBMS_UTILITY.GET_TIME;
+
+    -- Logging variables
+    v_table_name   VARCHAR2(128);
+    v_object_name  VARCHAR2(128);
+    v_object_type  VARCHAR2(20);
+    v_status       VARCHAR2(20);
+    v_error_msg    VARCHAR2(4000);
+
+
+    -- Runtime window check
+    FUNCTION runtime_exceeded RETURN BOOLEAN IS
+    BEGIN
+        RETURN (DBMS_UTILITY.GET_TIME - v_start_time)/100 > (p_max_runtime * 60);
+    END;
+
+    -- Logging wrapper
+    PROCEDURE log_result IS
+    BEGIN
+        log_action(
+            p_owner       => p_schema,
+            p_base_table  => v_table_name,
+            p_object_name => v_object_name,
+            p_object_type => v_object_type,
+            p_status      => v_status,
+            p_error_msg   => v_error_msg
+        );
+    END;
+
+
+BEGIN
+    -- Loop over NON-PARTITIONED TABLES
+    -------------------------------------------------------------------------
+    FOR tb1 IN (
+        SELECT t.table_name
+        FROM   dba_tables t
+        WHERE  t.owner       = p_schema
+          AND  t.partitioned = 'NO'
+          AND  t.temporary   = 'N'
+          AND  NOT EXISTS (
+                    SELECT 1
+                    FROM   hwm_log l
+                    WHERE  l.owner       = p_schema
+                      AND  l.base_table  = t.table_name
+                      AND  l.object_type = 'TABLE'
+                      AND  l.status      = 'SUCCESS'
+               )
+    )
+    LOOP
+        v_table_name := tb1.table_name;
+
+        -- Stop if runtime exceeded
+        IF runtime_exceeded THEN
+            RETURN;
+        END IF;
+
+        BEGIN
+            -- MOVE TABLE (with UPDATE INDEXES)
+            -------------------------------------------------------------------
+            EXECUTE IMMEDIATE 
+                ' ALTER TABLE '
+                ||p_schema
+                ||'.'
+                ||v_table_name
+                ||' MOVE TABLESPACE '
+                ||p_table_tbs
+                ||' UPDATE INDEXES ';
+
+            -- MOVE NON-PARTITIONED LOB SEGMENTS
+            -------------------------------------------------------------------
+            FOR lob_rec IN (
+                SELECT column_name
+                FROM   dba_lobs
+                WHERE  owner = p_schema
+                  AND  table_name = v_table_name
+            )
+            LOOP
+                EXECUTE IMMEDIATE
+                    ' ALTER TABLE '
+                    ||p_schema
+                    ||'.'
+                    ||v_table_name
+                    ||' MOVE LOB ('||lob_rec.column_name||') STORE AS (TABLESPACE '
+                    ||p_table_tbs||')';
+            END LOOP;
+
+
+            -------------------------------------------------------------------
+            -- REBUILD UNUSABLE INDEXES
+            -------------------------------------------------------------------
+            FOR ix IN (
+                SELECT index_name, tablespace_name
+                FROM   dba_indexes
+                WHERE  owner       = p_schema
+                  AND  table_name  = v_table_name
+                  AND  status      = 'UNUSABLE'
+            )
+            LOOP
+                IF ix.tablespace_name = p_schema||'_DATA_IDX' THEN
+                    EXECUTE IMMEDIATE
+                        ' ALTER INDEX '
+                        ||p_schema
+                        ||'.'
+                        ||ix.index_name
+                        ||' REBUILD TABLESPACE '
+                        ||p_index_tbs
+                        ;
+                END IF;
+                
+                IF ix.tablespace_name = p_schema||'_DATA' THEN
+                    EXECUTE IMMEDIATE
+                        ' ALTER INDEX '
+                        ||p_schema
+                        ||'.'
+                        ||ix.index_name
+                        ||' REBUILD TABLESPACE '
+                        ||p_table_tbs;
+                END IF;
+            END LOOP;
+
+
+            -- MOVE NON-PARTITIONED GLOBAL INDEXES
+            -------------------------------------------------------------------
+            FOR gix IN (
+                SELECT idx.index_name,
+                       idx.tablespace_name
+                FROM   dba_indexes idx
+                JOIN   dba_tables t
+                       ON t.table_name = idx.table_name
+                      AND t.owner      = idx.owner
+                WHERE  idx.owner       = p_schema
+                  AND  idx.table_name  = v_table_name
+                  AND  idx.index_type  = 'NORMAL'
+                  AND  idx.partitioned = 'NO'
+                  AND  t.temporary     = 'N'  
+                  AND  idx.status      = 'VALID'
+            )
+            LOOP
+
+
+                IF gix.tablespace_name = p_schema||'_DATA_IDX' THEN
+                    EXECUTE IMMEDIATE
+                        ' ALTER INDEX '
+                        ||p_schema
+                        ||'.'
+                        ||gix.index_name
+                        ||' REBUILD TABLESPACE '
+                        ||p_index_tbs;
+                ELSE
+                    EXECUTE IMMEDIATE
+                        ' ALTER INDEX '
+                        ||p_schema
+                        ||'.'
+                        ||gix.index_name
+                        ||' REBUILD TABLESPACE '
+                        ||p_table_tbs;
+                END IF;
+
+            END LOOP;
+            -------------------------------------------------------------------
+            -- LOG SUCCESS
+            -------------------------------------------------------------------
+            v_object_name := v_table_name;
+            v_object_type := 'TABLE';
+            v_status      := 'SUCCESS';
+            v_error_msg   := NULL;
+            log_result;
+
+
+        EXCEPTION WHEN OTHERS THEN
+            v_object_name := v_table_name;
+            v_object_type := 'TABLE';
+            v_status      := 'FAILED';
+            v_error_msg   := SQLERRM || ' | ' || DBMS_UTILITY.format_error_backtrace;
+            log_result;
+    END;
+
+    END LOOP;
+
+END hwm_move_tables;

@@ -1,0 +1,88 @@
+create or replace PROCEDURE hwm_gather_stats (
+    p_schema      IN VARCHAR2,
+    p_max_runtime IN NUMBER DEFAULT 120
+)
+AUTHID CURRENT_USER  
+IS
+    v_start_time    INTEGER := DBMS_UTILITY.GET_TIME;
+    v_base_table    VARCHAR2(128);
+    v_part_name     VARCHAR2(128);
+    v_obj_type      VARCHAR2(30);
+
+    FUNCTION runtime_exceeded RETURN BOOLEAN IS
+    BEGIN
+        RETURN (DBMS_UTILITY.GET_TIME - v_start_time) / 100 > (p_max_runtime * 60);
+    END;
+BEGIN
+
+    FOR t IN (
+        SELECT base_table,
+               object_name,
+               object_type
+        FROM   hwm_log
+        WHERE  owner          = p_schema
+        AND    status         = 'SUCCESS'
+        AND    stats_gathered IS NULL
+        ORDER BY base_table
+    )
+    LOOP
+        v_base_table := t.base_table;
+        v_part_name  := t.object_name;
+        v_obj_type   := t.object_type;
+
+        IF runtime_exceeded THEN
+            RETURN;
+        END IF;
+
+        -- UNLOCK table stats
+        ----------------------------------------------------------------
+        DBMS_STATS.UNLOCK_TABLE_STATS(p_schema, v_base_table);
+
+        -- SIMPLE, DIRECT STATS GATHERING
+        ----------------------------------------------------------------
+        IF v_obj_type = 'TABLE' THEN
+
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname          => p_schema,
+                tabname          => v_base_table,
+                cascade          => TRUE
+            );
+
+        ELSIF v_obj_type = 'PARTITION' THEN
+
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname          => p_schema,
+                tabname          => v_base_table,
+                partname         => v_part_name,
+                granularity      => 'PARTITION'
+            );
+
+        ELSIF v_obj_type = 'SUBPARTITION' THEN
+
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname          => p_schema,
+                tabname          => v_base_table,
+                partname         => v_part_name,
+                granularity      => 'SUBPARTITION'
+            );
+
+        END IF;
+
+        -- UPDATE stats_gathered = YES
+        ----------------------------------------------------------------
+        UPDATE hwm_log
+        SET    stats_gathered = 'YES'
+        WHERE  owner       = p_schema
+        AND    base_table  = v_base_table
+        AND    object_name = v_part_name
+        AND    object_type = v_obj_type;
+
+        COMMIT;
+
+    END LOOP;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('ERROR in HWM_GATHER_STATS: ' || SQLERRM);
+        RAISE;
+END;
