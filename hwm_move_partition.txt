@@ -1,8 +1,9 @@
-create or replace PROCEDURE hwm_move_partition (
+create or replace PROCEDURE         pr_hwm_move_partition (
     p_schema       IN VARCHAR2,
     p_table_tbs    IN VARCHAR2,
-    p_max_runtime  IN NUMBER DEFAULT 260,
-    p_country      IN VARCHAR2 DEFAULT NULL
+    p_index_tbs    IN VARCHAR2,
+    p_max_runtime  IN NUMBER DEFAULT 220,
+    p_table_name   IN VARCHAR2 DEFAULT NULL
 )
 AUTHID CURRENT_USER
 IS
@@ -26,7 +27,7 @@ IS
     ------------------------------------------------------------------
     PROCEDURE log_result IS
     BEGIN
-        log_action(
+        fdr.pr_log_action(
             p_owner       => p_schema,
             p_base_table  => v_table_name,
             p_object_name => v_object_name,
@@ -34,17 +35,6 @@ IS
             p_status      => v_status,
             p_error_msg   => v_error_msg
         );
-    END;
-
-    -- Unified Error Handler 
-    ------------------------------------------------------------------
-    PROCEDURE log_error(p_name VARCHAR2, p_type VARCHAR2) IS
-    BEGIN
-        v_object_name := p_name;
-        v_object_type := p_type;
-        v_status      := 'FAILED';
-        v_error_msg   := SQLERRM || ' | ' || DBMS_UTILITY.format_error_backtrace;
-        log_result;
     END;
 
 BEGIN
@@ -55,9 +45,13 @@ BEGIN
         FROM dba_tables
         WHERE owner = p_schema
           AND partitioned = 'YES'
+          AND  (p_table_name IS NULL OR table_name = UPPER(p_table_name))
     )
     LOOP
         v_table_name := tbl.table_name;
+
+        --unlock tables
+        DBMS_STATS.UNLOCK_TABLE_STATS(p_schema,v_table_name);
 
         -- SUBPARTITIONS (for composite tables)
         ------------------------------------------------------------------
@@ -66,9 +60,8 @@ BEGIN
             FROM dba_tab_subpartitions
             WHERE table_owner = p_schema
               AND table_name  = v_table_name
-              AND (p_country IS NULL OR subpartition_name LIKE '%'||p_country||'%')
               AND NOT EXISTS (
-                    SELECT 1 FROM hwm_log l
+                    SELECT 1 FROM fdr.hwm_log l
                     WHERE  l.owner       = p_schema
                       AND  l.base_table  = v_table_name
                       AND  l.object_type = 'SUBPARTITION'
@@ -77,14 +70,15 @@ BEGIN
               )
         )
         LOOP
-            IF runtime_exceeded THEN 
-                  RETURN;
-            END IF;
-            
+            exit when runtime_exceeded;
+
             v_subpartition_name := sp.subpartition_name;
 
-            BEGIN
-                EXECUTE IMMEDIATE
+            --  Set failure context before MOVE
+            v_object_name := v_subpartition_name;
+            v_object_type := 'SUBPARTITION';
+
+            EXECUTE IMMEDIATE
                     ' ALTER TABLE '
                     ||p_schema
                     ||'.'
@@ -92,16 +86,17 @@ BEGIN
                     ||' MOVE SUBPARTITION '
                     ||v_subpartition_name
                     ||' TABLESPACE '
-                    ||p_table_tbs;
+                    ||p_table_tbs
+                    || ' UPDATE GLOBAL INDEXES ';
 
                 FOR lob IN (
                     SELECT column_name, partitioned
                     FROM dba_lobs
                     WHERE owner = p_schema
                       AND table_name = v_table_name
+                      AND partitioned = 'YES'
                 )
                 LOOP
-                    IF lob.partitioned = 'YES' THEN
                         EXECUTE IMMEDIATE
                             ' ALTER TABLE '
                             ||p_schema
@@ -110,17 +105,30 @@ BEGIN
                             ||' MOVE SUBPARTITION '
                             ||v_subpartition_name
                             ||' LOB ('||lob.column_name||') STORE AS (TABLESPACE '||p_table_tbs||')';
-                    END IF;
                 END LOOP;
 
-                v_object_name := v_subpartition_name;
-                v_object_type := 'SUBPARTITION';
-                v_status      := 'SUCCESS';
-                log_result;
+                -- Rebuild indexes (LOCAL + GLOBAL)
+                --------------------------------------------
+                fdr.pr_hwm_rebuild_index(
+                    p_schema       => p_schema,
+                    p_table_name   => v_table_name,
+                    p_subpart_name => v_subpartition_name,
+                    p_index_tbs    => p_index_tbs
+                );
 
-            EXCEPTION WHEN OTHERS THEN
-                log_error(v_subpartition_name, 'SUBPARTITION');
-            END;
+
+                --Gather stats
+                DBMS_STATS.GATHER_TABLE_STATS(
+                        ownname     => p_schema,
+                        tabname     => v_table_name,
+                        partname    => v_subpartition_name,
+                        granularity => 'SUBPARTITION'
+                    );
+
+                --log success
+                v_status      := 'SUCCESS';
+                v_error_msg   := NULL;
+                log_result;
 
         END LOOP;
 
@@ -136,10 +144,9 @@ BEGIN
             WHERE  p.table_owner = p_schema
               AND  p.table_name  = v_table_name
               AND  t.subpartitioning_type = 'NONE'
-              AND (p_country IS NULL OR p.partition_name LIKE '%'||p_country||'%')
               AND NOT EXISTS (
-                    SELECT 1 
-                    FROM hwm_log l
+                    SELECT 1
+                    FROM fdr.hwm_log l
                     WHERE  l.owner       = p_schema
                       AND  l.base_table  = v_table_name
                       AND  l.object_type = 'PARTITION'
@@ -148,13 +155,14 @@ BEGIN
               )
         )
         LOOP
-            IF runtime_exceeded THEN 
-                 RETURN; 
-            END IF;
+            exit when runtime_exceeded;
 
             v_partition_name := pt.partition_name;
 
-            BEGIN
+            --Set failure context before MOVE
+            v_object_name := v_partition_name;
+            v_object_type := 'PARTITION';
+
                 EXECUTE IMMEDIATE
                     ' ALTER TABLE '
                     ||p_schema
@@ -163,16 +171,17 @@ BEGIN
                     ||' MOVE PARTITION '
                     ||v_partition_name
                     ||' TABLESPACE '
-                    ||p_table_tbs;
+                    ||p_table_tbs
+                    || ' UPDATE GLOBAL INDEXES ';
 
                 FOR lob IN (
                     SELECT column_name, partitioned
                     FROM dba_lobs
                     WHERE owner = p_schema
                       AND table_name = v_table_name
+                      AND partitioned = 'YES'
                 )
                 LOOP
-                    IF lob.partitioned = 'YES' THEN
                         EXECUTE IMMEDIATE
                             ' ALTER TABLE '
                             ||p_schema
@@ -180,22 +189,38 @@ BEGIN
                             ||v_table_name
                             ||' MOVE PARTITION '
                             ||v_partition_name
-                            ||' LOB ('||lob.column_name||') STORE AS (TABLESPACE '
-                            ||p_table_tbs||')';
-                    END IF;
+                            ||' LOB ('||lob.column_name||') STORE AS (TABLESPACE ' ||p_table_tbs||')';
                 END LOOP;
 
-                v_object_name := v_partition_name;
-                v_object_type := 'PARTITION';
-                v_status      := 'SUCCESS';
-                log_result;
+                -- Rebuild indexes (LOCAL + GLOBAL)
+                ------------------------------------------------------------------
+                fdr.pr_hwm_rebuild_index(
+                             p_schema       => p_schema,
+                             p_table_name   => v_table_name,
+                             p_part_name    => v_partition_name,
+                             p_index_tbs    => p_index_tbs
+                                    );
 
-            EXCEPTION WHEN OTHERS THEN
-                log_error(v_partition_name, 'PARTITION');
-            END;
+                --Gather stats
+                DBMS_STATS.GATHER_TABLE_STATS(
+                        ownname     => p_schema,
+                        tabname     => v_table_name,
+                        partname    => v_partition_name,
+                        granularity => 'PARTITION'
+                    );
+
+                --log success
+                v_status      := 'SUCCESS';
+                v_error_msg   := NULL;
+                log_result;
 
         END LOOP;
 
     END LOOP;
-
+EXCEPTION
+    WHEN OTHERS THEN
+        v_status    := 'FAILED';
+        v_error_msg := SQLERRM || ' | ' || DBMS_UTILITY.format_error_backtrace;
+        log_result;
+        RAISE;
 END;
