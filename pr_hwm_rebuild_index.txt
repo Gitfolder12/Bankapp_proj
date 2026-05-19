@@ -1,0 +1,69 @@
+create or replace PROCEDURE     pr_hwm_rebuild_index (
+    p_schema       IN VARCHAR2,
+    p_table_name   IN VARCHAR2,
+    p_part_name    IN VARCHAR2 DEFAULT NULL,
+    p_subpart_name IN VARCHAR2 DEFAULT NULL,
+    p_index_tbs    IN VARCHAR2
+)
+AUTHID CURRENT_USER
+IS
+BEGIN
+    -- SUBPARTITION INDEXES
+    -------------------------------------------------------
+        FOR i IN (
+            SELECT isp.index_name,
+                   isp.subpartition_name
+            FROM   dba_ind_subpartitions isp
+            JOIN dba_indexes ix ON isp.index_name = ix.index_name  AND isp.index_owner = ix.owner
+            WHERE  isp.index_owner        = p_schema
+            AND    ix.table_name          = p_table_name
+            AND    isp.subpartition_name  = p_subpart_name
+            and    ix.index_type         != 'IOT - TOP'
+            AND    (isp.status            = 'UNUSABLE' OR isp.tablespace_name IN (
+               p_schema||'_DATA',
+               p_schema||'_DATA_IDX' )   
+               )    
+
+        )
+        LOOP
+            EXECUTE IMMEDIATE
+                ' ALTER INDEX ' 
+                || p_schema 
+                || '.' 
+                || i.index_name 
+                ||' REBUILD SUBPARTITION ' 
+                || i.subpartition_name 
+                ||' ONLINE TABLESPACE ' 
+                || p_index_tbs;
+        END LOOP;
+
+    -- PARTITION INDEXES
+    -------------------------------------------
+        FOR i IN (
+            SELECT ip.index_name,
+                   ip.partition_name
+            FROM   dba_ind_partitions ip
+            JOIN dba_indexes ix ON ix.owner = ip.index_owner AND ix.index_name = ip.index_name
+            WHERE  ip.index_owner     = p_schema
+            AND    ix.table_name      = p_table_name
+            AND    ip.partition_name  = p_part_name
+            and    ix.index_type         != 'IOT - TOP'
+            AND   ( ip.status         = 'UNUSABLE' OR ip.tablespace_name IN (
+               p_schema||'_DATA',
+               p_schema||'_DATA_IDX' )   
+               )
+        )
+        LOOP
+            EXECUTE IMMEDIATE
+                ' ALTER INDEX ' 
+                || p_schema 
+                || '.' 
+                || i.index_name 
+                ||' REBUILD PARTITION ' 
+                || i.partition_name
+                ||' ONLINE TABLESPACE ' 
+                || p_index_tbs;
+        END LOOP;
+
+END ;
+/
