@@ -1,0 +1,40 @@
+Subject: Tablespace Migration / HWM Reclaim - Status Update
+
+Hi team,
+
+Quick update on the high-water-mark (HWM) reclaim and tablespace migration work across the STN, FDR, RDR, and SLR layers.
+
+Work completed so far:
+- STN Layer: move/rebuild/gather stats completed - 2.1 TB reclaimed
+- RDR Layer: move/rebuild/gather stats completed - 11 TB reclaimed
+- SLR Layer: move/rebuild/gather stats completed - 13.4 TB reclaimed
+- FDR Layer: drop/create operations completed; move/rebuild (reclaim) deferred to a later phase - estimated 5.3 TB pending
+
+Total space reclaimed so far: ~26.5 TB
+Projected total once FDR is completed: ~31.8 TB
+
+Activity volumes processed (from operation logs):
+- STN: 118 tables, 135 partitions, 2,380 subpartitions
+- FDR: 683 tables, 4,278 partitions, 15,074 subpartitions
+- RDR: 104 tables, 45 partitions, 25,060 subpartitions
+- SLR: 103 tables, 1,554 partitions, 74,695 subpartitions
+
+Estimated processing time (based on analysis of the operation logs, at a 4-hour daily window):
+
+Layer | Realistic active processing time | Days @ 4hr window
+STN | 1.1h | 1 day
+FDR | 7.8h | 2 days
+RDR | 13.3h | 4 days
+SLR | 31.3h | 7 days
+
+Note: these are estimates derived from production-like environment logs for planning purposes, not guaranteed runtimes - actual production timing may vary.
+
+Proposed plan going forward:
+- Phase 1 (Days 1-2): STN + FDR drop/create operations - completed
+- Phase 2 (Days 3-9): RDR + SLR in parallel, SLR being the long pole at ~7 days
+- Follow-up phase: FDR reclaim (move/rebuild/gather stats), estimated ~5.3 TB additional space recovery
+
+Will follow up once the FDR reclaim is scheduled and completed. Happy to discuss further or adjust timelines if needed.
+
+Thanks,
+[Your name]
