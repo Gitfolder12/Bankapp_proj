@@ -1,0 +1,5 @@
+ORA-01555: snapshot too old: rollback segment number 30 with name "_SYSSMU30_415539946$" too small
+ORA-06512: at "SLR.PR_HWM_MOVE_PARTITION", line 225
+ORA-06512: at "SLR.PR_HWM_MOVE_PARTITION", line 59
+ORA-06512: at "SLR.PR_HWM_MOVE_PARTITION", line 59
+ORA-06512: at line 8
